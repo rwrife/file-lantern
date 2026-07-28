@@ -32,13 +32,18 @@ Windows Search is slow, opaque, and cloud-tangled. Everything is fast but filena
 
 > Packaging is in progress; until the first release, run from source (see PLAN.md).
 
-1. Launch **file-lantern**. On first run, pick the drives/folders to index (defaults to your user profile).
-2. Wait for the initial index to build (progress shown; incremental afterward).
-3. Start typing in the search box:
-   - Plain text → filename match.
-   - `content:` prefix → full-text search inside files.
-   - `ext:pdf`, `size:>10mb`, `modified:<7d` → filters.
-4. Press **Enter** on a result to open it, or **Ctrl+Enter** to open its folder.
+### Run from source (Windows 10/11)
+
+Prerequisite: install the **.NET 8 SDK**.
+
+```powershell
+git clone https://github.com/rwrife/file-lantern.git
+cd file-lantern
+dotnet build FileLantern.sln
+dotnet run --project src/FileLantern.App/FileLantern.App.csproj
+```
+
+Current milestone status: the app currently provides the WPF shell (search box + results list UI). Indexing/search behavior lands in the next M1 issues.
 
 ### Example workflow
 
