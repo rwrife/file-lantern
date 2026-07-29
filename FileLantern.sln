@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileLantern.App", "src/File
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileLantern.Core", "src/FileLantern.Core/FileLantern.Core.csproj", "{4AF412A6-B0AB-49C2-BE3F-D9AA001BA125}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileLantern.Core.Tests", "tests/FileLantern.Core.Tests/FileLantern.Core.Tests.csproj", "{AAF96057-F5AA-46C5-9C56-FC2D07D99804}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,6 +22,10 @@ Global
 		{4AF412A6-B0AB-49C2-BE3F-D9AA001BA125}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4AF412A6-B0AB-49C2-BE3F-D9AA001BA125}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4AF412A6-B0AB-49C2-BE3F-D9AA001BA125}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AAF96057-F5AA-46C5-9C56-FC2D07D99804}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AAF96057-F5AA-46C5-9C56-FC2D07D99804}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AAF96057-F5AA-46C5-9C56-FC2D07D99804}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AAF96057-F5AA-46C5-9C56-FC2D07D99804}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
