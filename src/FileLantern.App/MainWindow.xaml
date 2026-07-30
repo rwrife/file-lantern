@@ -9,6 +9,11 @@
         Width="900"
         MinHeight="420"
         MinWidth="720">
+    <Window.InputBindings>
+        <KeyBinding Key="Enter" Command="{Binding OpenSelectedFileCommand}" />
+        <KeyBinding Key="Enter" Modifiers="Control" Command="{Binding OpenSelectedFolderCommand}" />
+    </Window.InputBindings>
+
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -22,10 +27,11 @@
                  FontSize="14"
                  Padding="10,0,10,0"
                  Text="{Binding Query, UpdateSourceTrigger=PropertyChanged}"
-                 ToolTip="Type to search files (index integration coming next milestones)." />
+                 ToolTip="Type to search indexed filenames. Enter opens the selected file. Ctrl+Enter opens the folder." />
 
         <ListView Grid.Row="2"
                   ItemsSource="{Binding Results}"
+                  SelectedItem="{Binding SelectedResult, Mode=TwoWay}"
                   ScrollViewer.CanContentScroll="True"
                   VirtualizingPanel.IsVirtualizing="True"
                   VirtualizingPanel.VirtualizationMode="Recycling">
