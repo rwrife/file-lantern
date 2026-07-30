@@ -43,7 +43,7 @@ dotnet build FileLantern.sln
 dotnet run --project src/FileLantern.App/FileLantern.App.csproj
 ```
 
-Current milestone status: the app currently provides the WPF shell (search box + results list UI). Indexing/search behavior lands in the next M1 issues.
+Current milestone status: filename indexing + instant search-as-you-type are now wired in for the desktop app. Full-text content search and advanced filters land in upcoming milestones.
 
 ### Example workflow
 
