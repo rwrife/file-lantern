@@ -43,6 +43,9 @@ public sealed class FileIndexDatabase : IDisposable
 
                 CREATE INDEX IF NOT EXISTS idx_files_name ON files(name);
                 CREATE INDEX IF NOT EXISTS idx_files_ext ON files(ext);
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS file_content
+                USING fts5(path UNINDEXED, body);
                 """;
 
             command.ExecuteNonQuery();
@@ -57,9 +60,10 @@ public sealed class FileIndexDatabase : IDisposable
         lock (_gate)
         {
             using var transaction = _connection.BeginTransaction();
-            using var command = _connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = """
+
+            using var upsertFileCommand = _connection.CreateCommand();
+            upsertFileCommand.Transaction = transaction;
+            upsertFileCommand.CommandText = """
                 INSERT INTO files(path, name, ext, size, mtime)
                 VALUES ($path, $name, $ext, $size, $mtime)
                 ON CONFLICT(path) DO UPDATE SET
@@ -69,25 +73,42 @@ public sealed class FileIndexDatabase : IDisposable
                     mtime = excluded.mtime;
                 """;
 
-            var pathParam = command.CreateParameter();
+            var pathParam = upsertFileCommand.CreateParameter();
             pathParam.ParameterName = "$path";
-            command.Parameters.Add(pathParam);
+            upsertFileCommand.Parameters.Add(pathParam);
 
-            var nameParam = command.CreateParameter();
+            var nameParam = upsertFileCommand.CreateParameter();
             nameParam.ParameterName = "$name";
-            command.Parameters.Add(nameParam);
+            upsertFileCommand.Parameters.Add(nameParam);
 
-            var extParam = command.CreateParameter();
+            var extParam = upsertFileCommand.CreateParameter();
             extParam.ParameterName = "$ext";
-            command.Parameters.Add(extParam);
+            upsertFileCommand.Parameters.Add(extParam);
 
-            var sizeParam = command.CreateParameter();
+            var sizeParam = upsertFileCommand.CreateParameter();
             sizeParam.ParameterName = "$size";
-            command.Parameters.Add(sizeParam);
+            upsertFileCommand.Parameters.Add(sizeParam);
 
-            var mtimeParam = command.CreateParameter();
+            var mtimeParam = upsertFileCommand.CreateParameter();
             mtimeParam.ParameterName = "$mtime";
-            command.Parameters.Add(mtimeParam);
+            upsertFileCommand.Parameters.Add(mtimeParam);
+
+            using var clearContentCommand = _connection.CreateCommand();
+            clearContentCommand.Transaction = transaction;
+            clearContentCommand.CommandText = "DELETE FROM file_content WHERE path = $path;";
+            var clearPathParam = clearContentCommand.CreateParameter();
+            clearPathParam.ParameterName = "$path";
+            clearContentCommand.Parameters.Add(clearPathParam);
+
+            using var upsertContentCommand = _connection.CreateCommand();
+            upsertContentCommand.Transaction = transaction;
+            upsertContentCommand.CommandText = "INSERT INTO file_content(path, body) VALUES ($path, $body);";
+            var contentPathParam = upsertContentCommand.CreateParameter();
+            contentPathParam.ParameterName = "$path";
+            upsertContentCommand.Parameters.Add(contentPathParam);
+            var bodyParam = upsertContentCommand.CreateParameter();
+            bodyParam.ParameterName = "$body";
+            upsertContentCommand.Parameters.Add(bodyParam);
 
             foreach (var record in records)
             {
@@ -97,7 +118,17 @@ public sealed class FileIndexDatabase : IDisposable
                 sizeParam.Value = record.Size;
                 mtimeParam.Value = record.ModifiedTimeUtcTicks;
 
-                command.ExecuteNonQuery();
+                upsertFileCommand.ExecuteNonQuery();
+
+                clearPathParam.Value = record.Path;
+                clearContentCommand.ExecuteNonQuery();
+
+                if (!string.IsNullOrWhiteSpace(record.ContentText))
+                {
+                    contentPathParam.Value = record.Path;
+                    bodyParam.Value = record.ContentText;
+                    upsertContentCommand.ExecuteNonQuery();
+                }
             }
 
             transaction.Commit();
@@ -141,6 +172,24 @@ public sealed class FileIndexDatabase : IDisposable
                 reader.GetInt64(3),
                 reader.GetInt64(4));
         }
+    }
+
+    public IReadOnlyList<SearchResultItem> Search(string query, int limit = 200)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        ThrowIfDisposed();
+
+        if (limit <= 0)
+        {
+            return Array.Empty<SearchResultItem>();
+        }
+
+        var trimmedQuery = query.Trim();
+        var contentQuery = TryGetContentQuery(trimmedQuery);
+
+        return contentQuery is not null
+            ? SearchByContent(contentQuery, limit)
+            : SearchByName(trimmedQuery, limit);
     }
 
     public IReadOnlyList<SearchResultItem> SearchByName(string query, int limit = 200)
@@ -194,6 +243,53 @@ public sealed class FileIndexDatabase : IDisposable
         }
     }
 
+    public IReadOnlyList<SearchResultItem> SearchByContent(string phrase, int limit = 200)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(phrase);
+        ThrowIfDisposed();
+
+        if (limit <= 0)
+        {
+            return Array.Empty<SearchResultItem>();
+        }
+
+        var trimmedPhrase = phrase.Trim();
+        if (string.IsNullOrWhiteSpace(trimmedPhrase))
+        {
+            return Array.Empty<SearchResultItem>();
+        }
+
+        var ftsQuery = BuildFtsPhraseQuery(trimmedPhrase);
+
+        lock (_gate)
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText = """
+                SELECT f.name, f.path, snippet(file_content, 1, '[', ']', '…', 12)
+                FROM file_content
+                JOIN files f ON f.path = file_content.path
+                WHERE file_content MATCH $match
+                ORDER BY bm25(file_content), f.name COLLATE NOCASE ASC
+                LIMIT $limit;
+                """;
+
+            command.Parameters.AddWithValue("$match", ftsQuery);
+            command.Parameters.AddWithValue("$limit", limit);
+
+            var results = new List<SearchResultItem>();
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new SearchResultItem(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+
+            return results;
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -216,5 +312,23 @@ public sealed class FileIndexDatabase : IDisposable
             .Replace("\\", "\\\\", StringComparison.Ordinal)
             .Replace("%", "\\%", StringComparison.Ordinal)
             .Replace("_", "\\_", StringComparison.Ordinal);
+    }
+
+    private static string BuildFtsPhraseQuery(string phrase)
+    {
+        var escaped = phrase.Replace("\"", "\"\"", StringComparison.Ordinal);
+        return $"\"{escaped}\"";
+    }
+
+    private static string? TryGetContentQuery(string query)
+    {
+        var markerIndex = query.IndexOf("content:", StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
+        {
+            return null;
+        }
+
+        var predicate = query[(markerIndex + "content:".Length)..].Trim();
+        return predicate.Length == 0 ? null : predicate;
     }
 }

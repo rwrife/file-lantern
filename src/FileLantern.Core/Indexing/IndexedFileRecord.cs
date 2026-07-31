@@ -5,7 +5,8 @@ public sealed record IndexedFileRecord(
     string Name,
     string Extension,
     long Size,
-    long ModifiedTimeUtcTicks)
+    long ModifiedTimeUtcTicks,
+    string? ContentText = null)
 {
     public static IndexedFileRecord FromPath(string filePath)
     {

@@ -92,6 +92,30 @@ public sealed class FileCrawlerTests
         Assert.Contains(logs, log => log.Contains("UnauthorizedAccessException", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Crawl_SkipsContentIndexing_ForFilesAboveConfiguredSizeLimit()
+    {
+        using var temp = new TemporaryDirectory();
+        var root = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(root);
+
+        var smallPath = Path.Combine(root, "small.txt");
+        var largePath = Path.Combine(root, "large.txt");
+
+        File.WriteAllText(smallPath, "critical phrase");
+        File.WriteAllText(largePath, new string('x', 200) + " critical phrase");
+
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+        var crawler = new FileCrawler(database, maxContentIndexBytes: 64);
+
+        crawler.Crawl(new[] { root });
+
+        var results = database.Search("content:critical phrase", limit: 10).ToArray();
+
+        Assert.Single(results);
+        Assert.Equal("small.txt", results[0].Name);
+    }
+
     private sealed class ThrowingFileCrawler : FileCrawler
     {
         private readonly string _blockedDirectory;
