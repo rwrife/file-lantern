@@ -2,13 +2,30 @@ namespace FileLantern.Core.Indexing;
 
 public class FileCrawler
 {
+    private const long DefaultMaxContentIndexBytes = 1_048_576;
+
     private readonly FileIndexDatabase _database;
     private readonly Action<string>? _log;
+    private readonly IReadOnlyList<ITextContentExtractor> _contentExtractors;
+    private readonly long _maxContentIndexBytes;
 
-    public FileCrawler(FileIndexDatabase database, Action<string>? log = null)
+    public FileCrawler(
+        FileIndexDatabase database,
+        Action<string>? log = null,
+        IReadOnlyList<ITextContentExtractor>? contentExtractors = null,
+        long maxContentIndexBytes = DefaultMaxContentIndexBytes)
     {
+        if (maxContentIndexBytes < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxContentIndexBytes), "Maximum content index size must be non-negative.");
+        }
+
         _database = database ?? throw new ArgumentNullException(nameof(database));
         _log = log;
+        _maxContentIndexBytes = maxContentIndexBytes;
+        _contentExtractors = contentExtractors is { Count: > 0 }
+            ? contentExtractors
+            : new ITextContentExtractor[] { new PlainTextContentExtractor() };
     }
 
     public CrawlResult Crawl(IEnumerable<string> rootPaths)
@@ -87,8 +104,18 @@ public class FileCrawler
                         continue;
                     }
 
+                    string? contentText = null;
+                    try
+                    {
+                        contentText = TryExtractContent(record);
+                    }
+                    catch (Exception ex) when (IsSkippable(ex))
+                    {
+                        _log?.Invoke($"Skipped content extraction for '{filePath}': {ex.GetType().Name} - {ex.Message}");
+                    }
+
                     onIndexed();
-                    yield return record;
+                    yield return record with { ContentText = contentText };
                 }
 
                 IReadOnlyList<string> directories;
@@ -109,6 +136,26 @@ public class FileCrawler
                 }
             }
         }
+    }
+
+    private string? TryExtractContent(IndexedFileRecord record)
+    {
+        if (record.Size > _maxContentIndexBytes)
+        {
+            return null;
+        }
+
+        foreach (var extractor in _contentExtractors)
+        {
+            if (!extractor.CanExtract(record.Path, record.Extension))
+            {
+                continue;
+            }
+
+            return extractor.ExtractText(record.Path);
+        }
+
+        return null;
     }
 
     private static bool IsSkippable(Exception ex)

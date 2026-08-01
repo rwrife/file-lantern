@@ -67,6 +67,45 @@ public sealed class FileIndexDatabaseSearchTests
         Assert.Equal(2, results.Count);
     }
 
+    [Fact]
+    public void Search_WithContentPredicate_ReturnsContentMatchesWithSnippets()
+    {
+        using var temp = new TemporaryDirectory();
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+
+        database.UpsertMany(new[]
+        {
+            BuildRecord(temp.Path, "invoice-a.md") with { ContentText = "Client requested refund for April invoice" },
+            BuildRecord(temp.Path, "invoice-b.md") with { ContentText = "Paid in full" },
+            BuildRecord(temp.Path, "notes.txt")
+        });
+
+        var results = database.Search("content:requested refund", limit: 10).ToArray();
+
+        Assert.Single(results);
+        Assert.Equal("invoice-a.md", results[0].Name);
+        Assert.False(string.IsNullOrWhiteSpace(results[0].Snippet));
+        Assert.Contains("refund", results[0].Snippet!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Search_WithContentPredicate_OnlyUsesPredicateText()
+    {
+        using var temp = new TemporaryDirectory();
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+
+        database.UpsertMany(new[]
+        {
+            BuildRecord(temp.Path, "todo.txt") with { ContentText = "TODO: wire dependency injection" },
+            BuildRecord(temp.Path, "another.txt") with { ContentText = "No marker here" }
+        });
+
+        var results = database.Search("ext:md content:TODO", limit: 10).ToArray();
+
+        Assert.Single(results);
+        Assert.Equal("todo.txt", results[0].Name);
+    }
+
     private static IndexedFileRecord BuildRecord(string root, string fileName)
     {
         var fullPath = Path.Combine(root, fileName);

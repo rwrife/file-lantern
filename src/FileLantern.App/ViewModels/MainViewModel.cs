@@ -93,7 +93,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await Task.Delay(SearchDebounce, cts.Token);
 
             var results = await Task.Run(
-                () => _database.SearchByName(querySnapshot, limit: 500),
+                () => _database.Search(querySnapshot, limit: 500),
                 cts.Token);
 
             if (cts.IsCancellationRequested)

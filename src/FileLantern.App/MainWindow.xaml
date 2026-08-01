@@ -27,7 +27,7 @@
                  FontSize="14"
                  Padding="10,0,10,0"
                  Text="{Binding Query, UpdateSourceTrigger=PropertyChanged}"
-                 ToolTip="Type to search indexed filenames. Enter opens the selected file. Ctrl+Enter opens the folder." />
+                 ToolTip="Type to search indexed filenames, or use content:&lt;phrase&gt; for full-text search. Enter opens the selected file. Ctrl+Enter opens the folder." />
 
         <ListView Grid.Row="2"
                   ItemsSource="{Binding Results}"
