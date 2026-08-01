@@ -135,6 +135,89 @@ public sealed class FileIndexDatabase : IDisposable
         }
     }
 
+    public void DeleteByPaths(IEnumerable<string> fullPaths)
+    {
+        ArgumentNullException.ThrowIfNull(fullPaths);
+        ThrowIfDisposed();
+
+        var normalizedPaths = fullPaths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (normalizedPaths.Length == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction();
+
+            using var deleteContentCommand = _connection.CreateCommand();
+            deleteContentCommand.Transaction = transaction;
+            deleteContentCommand.CommandText = "DELETE FROM file_content WHERE path = $path;";
+            var contentPathParam = deleteContentCommand.CreateParameter();
+            contentPathParam.ParameterName = "$path";
+            deleteContentCommand.Parameters.Add(contentPathParam);
+
+            using var deleteFileCommand = _connection.CreateCommand();
+            deleteFileCommand.Transaction = transaction;
+            deleteFileCommand.CommandText = "DELETE FROM files WHERE path = $path;";
+            var filePathParam = deleteFileCommand.CreateParameter();
+            filePathParam.ParameterName = "$path";
+            deleteFileCommand.Parameters.Add(filePathParam);
+
+            foreach (var path in normalizedPaths)
+            {
+                contentPathParam.Value = path;
+                deleteContentCommand.ExecuteNonQuery();
+
+                filePathParam.Value = path;
+                deleteFileCommand.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
+        }
+    }
+
+    public IReadOnlyList<string> ListPathsUnderRoot(string rootPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
+        ThrowIfDisposed();
+
+        var normalizedRoot = Path.GetFullPath(rootPath);
+        var rootPrefix = normalizedRoot.EndsWith(Path.DirectorySeparatorChar)
+            || normalizedRoot.EndsWith(Path.AltDirectorySeparatorChar)
+            ? normalizedRoot
+            : normalizedRoot + Path.DirectorySeparatorChar;
+
+        lock (_gate)
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText = """
+                SELECT path
+                FROM files
+                WHERE path = $root
+                   OR path LIKE $prefix ESCAPE '\'
+                ORDER BY path COLLATE NOCASE ASC;
+                """;
+
+            command.Parameters.AddWithValue("$root", normalizedRoot);
+            command.Parameters.AddWithValue("$prefix", $"{EscapeLikePattern(rootPrefix)}%");
+
+            var paths = new List<string>();
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                paths.Add(reader.GetString(0));
+            }
+
+            return paths;
+        }
+    }
+
     public int CountFiles()
     {
         ThrowIfDisposed();
@@ -213,11 +296,11 @@ public sealed class FileIndexDatabase : IDisposable
             command.CommandText = """
                 SELECT name, path
                 FROM files
-                WHERE name LIKE $contains ESCAPE '\\'
+                WHERE name LIKE $contains ESCAPE '\'
                 ORDER BY
                     CASE
                         WHEN name = $exact COLLATE NOCASE THEN 0
-                        WHEN name LIKE $prefix ESCAPE '\\' THEN 1
+                        WHEN name LIKE $prefix ESCAPE '\' THEN 1
                         ELSE 2
                     END,
                     LENGTH(name) ASC,

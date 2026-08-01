@@ -113,8 +113,8 @@ public sealed class FileIndexDatabaseSearchTests
             fullPath,
             fileName,
             Path.GetExtension(fileName).TrimStart('.'),
-            size: 123,
-            modifiedTimeUtcTicks: DateTime.UtcNow.Ticks);
+            123,
+            DateTime.UtcNow.Ticks);
     }
 
     private sealed class TemporaryDirectory : IDisposable
