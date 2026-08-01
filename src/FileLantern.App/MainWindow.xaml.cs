@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using FileLantern.App.ViewModels;
 using FileLantern.Core.Indexing;
@@ -8,6 +9,9 @@ public partial class MainWindow : Window
 {
     private readonly FileIndexDatabase _database;
     private readonly bool _seedIndexOnLoad;
+    private readonly string[] _indexedRoots;
+
+    private LiveFileIndexUpdater? _liveIndexUpdater;
 
     public MainWindow()
     {
@@ -21,29 +25,37 @@ public partial class MainWindow : Window
         _database = new FileIndexDatabase(databasePath);
         _seedIndexOnLoad = _database.CountFiles() == 0;
 
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        _indexedRoots = !string.IsNullOrWhiteSpace(home) && Directory.Exists(home)
+            ? new[] { home }
+            : Array.Empty<string>();
+
         DataContext = new MainViewModel(_database);
 
         Loaded += OnLoaded;
-        Closed += (_, _) => _database.Dispose();
+        Closed += (_, _) =>
+        {
+            _liveIndexUpdater?.Dispose();
+            _database.Dispose();
+        };
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (!_seedIndexOnLoad)
+        if (_indexedRoots.Length == 0)
         {
             return;
         }
 
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (string.IsNullOrWhiteSpace(home) || !Directory.Exists(home))
+        if (_seedIndexOnLoad)
         {
-            return;
+            await Task.Run(() =>
+            {
+                var crawler = new FileCrawler(_database);
+                crawler.Crawl(_indexedRoots);
+            });
         }
 
-        await Task.Run(() =>
-        {
-            var crawler = new FileCrawler(_database);
-            crawler.Crawl(new[] { home });
-        });
+        _liveIndexUpdater ??= new LiveFileIndexUpdater(_database, _indexedRoots);
     }
 }
