@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using FileLantern.Core;
 using Microsoft.Data.Sqlite;
 
@@ -5,6 +7,8 @@ namespace FileLantern.Core.Indexing;
 
 public sealed class FileIndexDatabase : IDisposable
 {
+    private static readonly string[] ComparisonOperators = [">=", "<=", ">", "<", "="];
+
     private readonly SqliteConnection _connection;
     private readonly object _gate = new();
     private bool _disposed;
@@ -267,12 +271,20 @@ public sealed class FileIndexDatabase : IDisposable
             return Array.Empty<SearchResultItem>();
         }
 
-        var trimmedQuery = query.Trim();
-        var contentQuery = TryGetContentQuery(trimmedQuery);
+        var parsed = ParseQuery(query);
+        if (!parsed.HasStructuredFilters)
+        {
+            if (parsed.NameTerms.Count == 0)
+            {
+                return Array.Empty<SearchResultItem>();
+            }
 
-        return contentQuery is not null
-            ? SearchByContent(contentQuery, limit)
-            : SearchByName(trimmedQuery, limit);
+            return parsed.NameTerms.Count == 1
+                ? SearchByName(parsed.NameTerms[0], limit)
+                : SearchWithFilters(parsed, limit);
+        }
+
+        return SearchWithFilters(parsed, limit);
     }
 
     public IReadOnlyList<SearchResultItem> SearchByName(string query, int limit = 200)
@@ -389,6 +401,420 @@ public sealed class FileIndexDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
 
+    private IReadOnlyList<SearchResultItem> SearchWithFilters(ParsedSearchQuery query, int limit)
+    {
+        lock (_gate)
+        {
+            using var command = _connection.CreateCommand();
+            var hasContentFilter = query.ContentPhrase is not null;
+
+            var sql = new StringBuilder();
+            sql.Append("SELECT f.name, f.path");
+            sql.Append(hasContentFilter ? ", snippet(file_content, 1, '[', ']', '…', 12)" : ", NULL");
+            sql.Append(" FROM files f ");
+
+            if (hasContentFilter)
+            {
+                sql.Append("JOIN file_content ON file_content.path = f.path ");
+            }
+
+            sql.Append("WHERE 1 = 1 ");
+
+            if (query.Extension is not null)
+            {
+                sql.Append("AND f.ext = $ext COLLATE NOCASE ");
+                command.Parameters.AddWithValue("$ext", query.Extension);
+            }
+
+            if (query.SizeFilter is not null)
+            {
+                sql.Append($"AND f.size {query.SizeFilter.Operator} $sizeBytes ");
+                command.Parameters.AddWithValue("$sizeBytes", query.SizeFilter.Value);
+            }
+
+            if (query.ModifiedAgeFilter is not null)
+            {
+                var cutoffTicks = DateTime.UtcNow.Ticks - query.ModifiedAgeFilter.Value;
+                var modifiedOperator = query.ModifiedAgeFilter.Operator switch
+                {
+                    "<" => ">",
+                    "<=" => ">=",
+                    ">" => "<",
+                    ">=" => "<=",
+                    "=" => "=",
+                    _ => throw new InvalidOperationException($"Unsupported modified filter operator: {query.ModifiedAgeFilter.Operator}")
+                };
+
+                sql.Append($"AND f.mtime {modifiedOperator} $modifiedCutoff ");
+                command.Parameters.AddWithValue("$modifiedCutoff", cutoffTicks);
+            }
+
+            if (hasContentFilter)
+            {
+                sql.Append("AND file_content MATCH $contentMatch ");
+                command.Parameters.AddWithValue("$contentMatch", BuildFtsPhraseQuery(query.ContentPhrase!));
+            }
+
+            for (var i = 0; i < query.NameTerms.Count; i++)
+            {
+                var paramName = $"$nameTerm{i}";
+                sql.Append($"AND f.name LIKE {paramName} ESCAPE '\' ");
+                command.Parameters.AddWithValue(paramName, $"%{EscapeLikePattern(query.NameTerms[i])}%");
+            }
+
+            sql.Append("ORDER BY ");
+            if (hasContentFilter)
+            {
+                sql.Append("bm25(file_content), ");
+            }
+
+            if (query.NameTerms.Count > 0)
+            {
+                var leadTerm = query.NameTerms[0];
+                sql.Append("CASE ");
+                sql.Append("WHEN f.name = $leadExact COLLATE NOCASE THEN 0 ");
+                sql.Append("WHEN f.name LIKE $leadPrefix ESCAPE '\' THEN 1 ");
+                sql.Append("ELSE 2 END, ");
+                command.Parameters.AddWithValue("$leadExact", leadTerm);
+                command.Parameters.AddWithValue("$leadPrefix", $"{EscapeLikePattern(leadTerm)}%");
+            }
+
+            sql.Append("LENGTH(f.name) ASC, f.name COLLATE NOCASE ASC ");
+            sql.Append("LIMIT $limit;");
+            command.Parameters.AddWithValue("$limit", limit);
+
+            command.CommandText = sql.ToString();
+
+            var results = new List<SearchResultItem>();
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new SearchResultItem(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+
+            return results;
+        }
+    }
+
+    private static ParsedSearchQuery ParseQuery(string query)
+    {
+        var parsed = new ParsedSearchQuery();
+
+        foreach (var token in TokenizeQuery(query.Trim()))
+        {
+            if (TryApplyFilterToken(token, parsed))
+            {
+                continue;
+            }
+
+            parsed.NameTerms.Add(token);
+        }
+
+        return parsed;
+    }
+
+    private static IEnumerable<string> TokenizeQuery(string query)
+    {
+        var tokens = new List<string>();
+        var current = new StringBuilder();
+        var inQuotes = false;
+
+        foreach (var character in query)
+        {
+            if (character == '"')
+            {
+                inQuotes = !inQuotes;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(character) && !inQuotes)
+            {
+                if (current.Length > 0)
+                {
+                    tokens.Add(current.ToString());
+                    current.Clear();
+                }
+
+                continue;
+            }
+
+            current.Append(character);
+        }
+
+        if (current.Length > 0)
+        {
+            tokens.Add(current.ToString());
+        }
+
+        return tokens;
+    }
+
+    private static bool TryApplyFilterToken(string token, ParsedSearchQuery query)
+    {
+        if (token.StartsWith("ext:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (query.Extension is not null)
+            {
+                return false;
+            }
+
+            var extension = token["ext:".Length..].Trim();
+            if (TryNormalizeExtension(extension, out var normalizedExtension))
+            {
+                query.Extension = normalizedExtension;
+                return true;
+            }
+
+            return false;
+        }
+
+        if (token.StartsWith("size:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (query.SizeFilter is not null)
+            {
+                return false;
+            }
+
+            var sizeText = token["size:".Length..].Trim();
+            if (TryParseByteSize(sizeText, out var sizeFilter))
+            {
+                query.SizeFilter = sizeFilter;
+                return true;
+            }
+
+            return false;
+        }
+
+        if (token.StartsWith("modified:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (query.ModifiedAgeFilter is not null)
+            {
+                return false;
+            }
+
+            var modifiedText = token["modified:".Length..].Trim();
+            if (TryParseAgeFilter(modifiedText, out var ageFilter))
+            {
+                query.ModifiedAgeFilter = ageFilter;
+                return true;
+            }
+
+            return false;
+        }
+
+        if (token.StartsWith("content:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (query.ContentPhrase is not null)
+            {
+                return false;
+            }
+
+            var content = token["content:".Length..].Trim();
+            if (content.Length > 0)
+            {
+                query.ContentPhrase = content;
+                return true;
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    private static bool TryNormalizeExtension(string value, out string extension)
+    {
+        extension = string.Empty;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim().TrimStart('.');
+        if (normalized.Length == 0)
+        {
+            return false;
+        }
+
+        if (normalized.Any(char.IsWhiteSpace))
+        {
+            return false;
+        }
+
+        extension = normalized.ToLowerInvariant();
+        return true;
+    }
+
+    private static bool TryParseByteSize(string text, out ComparisonFilter sizeFilter)
+    {
+        sizeFilter = default;
+
+        if (!TrySplitComparison(text, out var @operator, out var literal))
+        {
+            return false;
+        }
+
+        if (!TryParseNumberAndUnit(literal, out var value, out var unit))
+        {
+            return false;
+        }
+
+        var multiplier = unit switch
+        {
+            "" or "b" => 1d,
+            "k" or "kb" or "kib" => 1024d,
+            "m" or "mb" or "mib" => 1024d * 1024d,
+            "g" or "gb" or "gib" => 1024d * 1024d * 1024d,
+            "t" or "tb" or "tib" => 1024d * 1024d * 1024d * 1024d,
+            _ => -1d
+        };
+
+        if (multiplier < 0)
+        {
+            return false;
+        }
+
+        var bytes = value * multiplier;
+        if (bytes < 0 || bytes > long.MaxValue)
+        {
+            return false;
+        }
+
+        sizeFilter = new ComparisonFilter(@operator, Convert.ToInt64(Math.Round(bytes, MidpointRounding.AwayFromZero)));
+        return true;
+    }
+
+    private static bool TryParseAgeFilter(string text, out ComparisonFilter ageFilter)
+    {
+        ageFilter = default;
+
+        if (!TrySplitComparison(text, out var @operator, out var literal))
+        {
+            return false;
+        }
+
+        if (!TryParseDurationTicks(literal, out var ticks))
+        {
+            return false;
+        }
+
+        ageFilter = new ComparisonFilter(@operator, ticks);
+        return true;
+    }
+
+    private static bool TrySplitComparison(string text, out string @operator, out string literal)
+    {
+        @operator = string.Empty;
+        literal = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var trimmed = text.Trim();
+        foreach (var candidate in ComparisonOperators)
+        {
+            if (!trimmed.StartsWith(candidate, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var rest = trimmed[candidate.Length..].Trim();
+            if (rest.Length == 0)
+            {
+                return false;
+            }
+
+            @operator = candidate;
+            literal = rest;
+            return true;
+        }
+
+        @operator = "=";
+        literal = trimmed;
+        return true;
+    }
+
+    private static bool TryParseNumberAndUnit(string literal, out double value, out string unit)
+    {
+        value = 0;
+        unit = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(literal))
+        {
+            return false;
+        }
+
+        var index = 0;
+        while (index < literal.Length &&
+               (char.IsDigit(literal[index]) || literal[index] is '.' or ','))
+        {
+            index++;
+        }
+
+        if (index == 0)
+        {
+            return false;
+        }
+
+        var valueText = literal[..index].Replace(',', '.');
+        if (!double.TryParse(valueText, NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+        {
+            return false;
+        }
+
+        if (value < 0)
+        {
+            return false;
+        }
+
+        unit = literal[index..].Trim().ToLowerInvariant();
+        return true;
+    }
+
+    private static bool TryParseDurationTicks(string literal, out long ticks)
+    {
+        ticks = 0;
+
+        if (!TryParseNumberAndUnit(literal, out var value, out var unit))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(unit))
+        {
+            return false;
+        }
+
+        var seconds = unit switch
+        {
+            "s" => value,
+            "m" => value * 60d,
+            "h" => value * 60d * 60d,
+            "d" => value * 60d * 60d * 24d,
+            "w" => value * 60d * 60d * 24d * 7d,
+            _ => -1d
+        };
+
+        if (seconds < 0)
+        {
+            return false;
+        }
+
+        var tickCount = seconds * TimeSpan.TicksPerSecond;
+        if (tickCount <= 0 || tickCount > long.MaxValue)
+        {
+            return false;
+        }
+
+        ticks = Convert.ToInt64(Math.Round(tickCount, MidpointRounding.AwayFromZero));
+        return true;
+    }
+
     private static string EscapeLikePattern(string value)
     {
         return value
@@ -403,15 +829,24 @@ public sealed class FileIndexDatabase : IDisposable
         return $"\"{escaped}\"";
     }
 
-    private static string? TryGetContentQuery(string query)
-    {
-        var markerIndex = query.IndexOf("content:", StringComparison.OrdinalIgnoreCase);
-        if (markerIndex < 0)
-        {
-            return null;
-        }
+    private readonly record struct ComparisonFilter(string Operator, long Value);
 
-        var predicate = query[(markerIndex + "content:".Length)..].Trim();
-        return predicate.Length == 0 ? null : predicate;
+    private sealed class ParsedSearchQuery
+    {
+        public List<string> NameTerms { get; } = [];
+
+        public string? Extension { get; set; }
+
+        public ComparisonFilter? SizeFilter { get; set; }
+
+        public ComparisonFilter? ModifiedAgeFilter { get; set; }
+
+        public string? ContentPhrase { get; set; }
+
+        public bool HasStructuredFilters =>
+            Extension is not null
+            || SizeFilter is not null
+            || ModifiedAgeFilter is not null
+            || ContentPhrase is not null;
     }
 }

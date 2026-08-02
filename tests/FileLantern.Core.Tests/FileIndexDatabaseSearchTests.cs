@@ -68,19 +68,19 @@ public sealed class FileIndexDatabaseSearchTests
     }
 
     [Fact]
-    public void Search_WithContentPredicate_ReturnsContentMatchesWithSnippets()
+    public void Search_WithContentFilter_ReturnsContentMatchesWithSnippets()
     {
         using var temp = new TemporaryDirectory();
         using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
 
         database.UpsertMany(new[]
         {
-            BuildRecord(temp.Path, "invoice-a.md") with { ContentText = "Client requested refund for April invoice" },
-            BuildRecord(temp.Path, "invoice-b.md") with { ContentText = "Paid in full" },
+            BuildRecord(temp.Path, "invoice-a.md", contentText: "Client requested refund for April invoice"),
+            BuildRecord(temp.Path, "invoice-b.md", contentText: "Paid in full"),
             BuildRecord(temp.Path, "notes.txt")
         });
 
-        var results = database.Search("content:requested refund", limit: 10).ToArray();
+        var results = database.Search("content:\"requested refund\"", limit: 10).ToArray();
 
         Assert.Single(results);
         Assert.Equal("invoice-a.md", results[0].Name);
@@ -89,32 +89,158 @@ public sealed class FileIndexDatabaseSearchTests
     }
 
     [Fact]
-    public void Search_WithContentPredicate_OnlyUsesPredicateText()
+    public void Search_WithExtFilter_LimitsByExtension()
     {
         using var temp = new TemporaryDirectory();
         using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
 
         database.UpsertMany(new[]
         {
-            BuildRecord(temp.Path, "todo.txt") with { ContentText = "TODO: wire dependency injection" },
-            BuildRecord(temp.Path, "another.txt") with { ContentText = "No marker here" }
+            BuildRecord(temp.Path, "design.pdf"),
+            BuildRecord(temp.Path, "design.md"),
+            BuildRecord(temp.Path, "notes.txt")
+        });
+
+        var results = database.Search("ext:pdf", limit: 10).Select(result => result.Name).ToArray();
+
+        Assert.Equal(new[] { "design.pdf" }, results);
+    }
+
+    [Fact]
+    public void Search_WithSizeFilter_ParsesComparatorAndUnits()
+    {
+        using var temp = new TemporaryDirectory();
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+
+        database.UpsertMany(new[]
+        {
+            BuildRecord(temp.Path, "small.zip", size: 2 * 1024L * 1024L),
+            BuildRecord(temp.Path, "large.zip", size: 12 * 1024L * 1024L)
+        });
+
+        var results = database.Search("size:>10mb", limit: 10).Select(result => result.Name).ToArray();
+
+        Assert.Equal(new[] { "large.zip" }, results);
+    }
+
+    [Fact]
+    public void Search_WithModifiedFilter_ParsesRelativeAgeComparators()
+    {
+        using var temp = new TemporaryDirectory();
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+        var now = DateTime.UtcNow;
+
+        database.UpsertMany(new[]
+        {
+            BuildRecord(temp.Path, "fresh.txt", modifiedUtc: now.Subtract(TimeSpan.FromDays(2))),
+            BuildRecord(temp.Path, "stale.txt", modifiedUtc: now.Subtract(TimeSpan.FromDays(14)))
+        });
+
+        var recent = database.Search("modified:<7d", limit: 10).Select(result => result.Name).ToArray();
+        var old = database.Search("modified:>7d", limit: 10).Select(result => result.Name).ToArray();
+
+        Assert.Equal(new[] { "fresh.txt" }, recent);
+        Assert.Equal(new[] { "stale.txt" }, old);
+    }
+
+    [Fact]
+    public void Search_CombinesFiltersWithFreeTextTerms()
+    {
+        using var temp = new TemporaryDirectory();
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+        var now = DateTime.UtcNow;
+
+        database.UpsertMany(new[]
+        {
+            BuildRecord(
+                temp.Path,
+                "report-april.pdf",
+                size: 12 * 1024L * 1024L,
+                modifiedUtc: now.Subtract(TimeSpan.FromDays(2)),
+                contentText: "Quarterly revenue for North America"),
+            BuildRecord(
+                temp.Path,
+                "report-april.txt",
+                size: 12 * 1024L * 1024L,
+                modifiedUtc: now.Subtract(TimeSpan.FromDays(2)),
+                contentText: "Quarterly revenue for North America"),
+            BuildRecord(
+                temp.Path,
+                "report-old.pdf",
+                size: 12 * 1024L * 1024L,
+                modifiedUtc: now.Subtract(TimeSpan.FromDays(20)),
+                contentText: "Quarterly revenue for North America"),
+            BuildRecord(
+                temp.Path,
+                "notes-april.pdf",
+                size: 12 * 1024L * 1024L,
+                modifiedUtc: now.Subtract(TimeSpan.FromDays(2)),
+                contentText: "Sprint planning notes")
+        });
+
+        var results = database.Search(
+            "report ext:pdf size:>10mb modified:<7d content:\"Quarterly revenue\"",
+            limit: 10).ToArray();
+
+        Assert.Single(results);
+        Assert.Equal("report-april.pdf", results[0].Name);
+        Assert.False(string.IsNullOrWhiteSpace(results[0].Snippet));
+    }
+
+    [Fact]
+    public void Search_InvalidFilterSyntax_IsTreatedAsText()
+    {
+        using var temp = new TemporaryDirectory();
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+
+        database.UpsertMany(new[]
+        {
+            BuildRecord(temp.Path, "size:>>10mb cheatsheet.txt"),
+            BuildRecord(temp.Path, "normal.txt")
+        });
+
+        var results = database.Search("size:>>10mb", limit: 10).ToArray();
+
+        Assert.Single(results);
+        Assert.Equal("size:>>10mb cheatsheet.txt", results[0].Name);
+    }
+
+    [Fact]
+    public void Search_CombinesContentAndExtFilters()
+    {
+        using var temp = new TemporaryDirectory();
+        using var database = new FileIndexDatabase(Path.Combine(temp.Path, "index.db"));
+
+        database.UpsertMany(new[]
+        {
+            BuildRecord(temp.Path, "todo.md", contentText: "TODO: wire dependency injection"),
+            BuildRecord(temp.Path, "todo.txt", contentText: "TODO: wire dependency injection")
         });
 
         var results = database.Search("ext:md content:TODO", limit: 10).ToArray();
 
         Assert.Single(results);
-        Assert.Equal("todo.txt", results[0].Name);
+        Assert.Equal("todo.md", results[0].Name);
     }
 
-    private static IndexedFileRecord BuildRecord(string root, string fileName)
+    private static IndexedFileRecord BuildRecord(
+        string root,
+        string fileName,
+        long size = 123,
+        DateTime? modifiedUtc = null,
+        string? contentText = null)
     {
         var fullPath = Path.Combine(root, fileName);
-        return new IndexedFileRecord(
+        var record = new IndexedFileRecord(
             fullPath,
             fileName,
             Path.GetExtension(fileName).TrimStart('.'),
-            123,
-            DateTime.UtcNow.Ticks);
+            size,
+            (modifiedUtc ?? DateTime.UtcNow).Ticks);
+
+        return contentText is null
+            ? record
+            : record with { ContentText = contentText };
     }
 
     private sealed class TemporaryDirectory : IDisposable
