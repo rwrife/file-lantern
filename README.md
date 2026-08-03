@@ -43,7 +43,7 @@ dotnet build FileLantern.sln
 dotnet run --project src/FileLantern.App/FileLantern.App.csproj
 ```
 
-Current milestone status: filename indexing + instant search-as-you-type are now wired in for the desktop app. Full-text content search and advanced filters land in upcoming milestones.
+Current milestone status: filename indexing, instant search-as-you-type, full-text content search, and structured query filters are wired in for the desktop app.
 
 ### Example workflow
 
@@ -53,6 +53,23 @@ content:refund    → files whose text contains "refund"
 ext:md content:TODO   → markdown files containing "TODO"
 size:>100mb ext:zip   → large archives
 ```
+
+### Query syntax
+
+You can combine plain filename terms with any of these filters:
+
+- `ext:<value>` — extension filter (examples: `ext:pdf`, `ext:md`).
+- `size:<op><value>` — size in bytes/kb/mb/gb/tb (examples: `size:>10mb`, `size:<=512kb`).
+- `modified:<op><age>` — relative age (`s`, `m`, `h`, `d`, `w`) where `modified:<7d` means modified within the last 7 days and `modified:>7d` means older than 7 days.
+- `content:<phrase>` — full-text phrase search against indexed file content. Use quotes for multi-word phrases, for example `content:"quarterly revenue"`.
+
+All filters can be mixed with filename terms in a single query, for example:
+
+- `invoice ext:pdf modified:<30d`
+- `report ext:md content:TODO`
+- `notes size:>1mb modified:>90d`
+
+If a filter token is malformed, it is treated as plain text rather than crashing the search.
 
 ### Local-AI integration (optional)
 
