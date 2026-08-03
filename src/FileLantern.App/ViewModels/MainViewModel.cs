@@ -8,6 +8,7 @@ using System.Windows.Input;
 using System.Windows.Threading;
 using FileLantern.Core;
 using FileLantern.Core.Indexing;
+using FileLantern.Core.LocalAi;
 
 namespace FileLantern.App.ViewModels;
 
@@ -16,6 +17,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private static readonly TimeSpan SearchDebounce = TimeSpan.FromMilliseconds(150);
 
     private readonly FileIndexDatabase _database;
+    private readonly LocalAiQueryTranslator? _localAiQueryTranslator;
     private readonly Dispatcher? _dispatcher;
     private readonly RelayCommand _openSelectedFileCommand;
     private readonly RelayCommand _openSelectedFolderCommand;
@@ -24,9 +26,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _query = string.Empty;
     private SearchResultItem? _selectedResult;
 
-    public MainViewModel(FileIndexDatabase database)
+    public MainViewModel(FileIndexDatabase database, LocalAiQueryTranslator? localAiQueryTranslator = null)
     {
         _database = database ?? throw new ArgumentNullException(nameof(database));
+        _localAiQueryTranslator = localAiQueryTranslator;
         _dispatcher = Application.Current?.Dispatcher;
 
         _openSelectedFileCommand = new RelayCommand(OpenSelectedFile, () => SelectedResult is not null);
@@ -93,8 +96,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             await Task.Delay(SearchDebounce, cts.Token);
 
+            var effectiveQuery = querySnapshot;
+            if (_localAiQueryTranslator is not null)
+            {
+                var translatedQuery = await _localAiQueryTranslator.TryTranslateAsync(querySnapshot, cts.Token);
+                if (!string.IsNullOrWhiteSpace(translatedQuery))
+                {
+                    effectiveQuery = translatedQuery;
+                }
+            }
+
             var results = await Task.Run(
-                () => _database.Search(querySnapshot, limit: 500),
+                () => _database.Search(effectiveQuery, limit: 500),
                 cts.Token);
 
             if (cts.IsCancellationRequested)

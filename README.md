@@ -74,18 +74,34 @@ If a filter token is malformed, it is treated as plain text rather than crashing
 ### Local-AI integration (optional)
 
 file-lantern works fully without AI. When enabled, natural-language queries are
-answered by a small local model — no data leaves your machine.
+translated by a small local model into the same structured query syntax used by
+the core engine (`ext:`, `size:`, `modified:`, `content:`).
 
 - **Compatible backends:** [Ollama](https://ollama.com) or any
-  [llama.cpp](https://github.com/ggml-org/llama.cpp) OpenAI-compatible server
-  running on `localhost`.
+  [llama.cpp](https://github.com/ggml-org/llama.cpp) OpenAI-compatible server.
 - **Suggested tiny models:** MiniCPM-family, Qwen2.5-1.5B/3B-Instruct,
-  Llama-3.2-1B/3B, Phi-3-mini — anything that fits comfortably in RAM/VRAM.
-- **What AI does here:** translate a natural-language query into structured
-  filters + keywords over the local index, and optionally rank/snippet results.
-  Indexing and search always run locally with or without AI.
-- Configure the endpoint (default `http://localhost:11434`) and model in Settings.
-  If unreachable, file-lantern silently falls back to non-AI search.
+  Llama-3.2-1B/3B, Phi-3-mini.
+- **Fail-closed behavior:** if local-AI is disabled, unreachable, times out, or
+  returns malformed JSON, search silently falls back to normal non-AI search.
+- **Privacy guarantee:** local-AI requests are allowed only to loopback hosts
+  (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`). Non-local endpoints are ignored.
+
+Settings are stored at:
+
+- `%LocalAppData%\\file-lantern\\settings.json`
+
+Example:
+
+```json
+{
+  "localAi": {
+    "enabled": true,
+    "endpointUrl": "http://localhost:11434",
+    "model": "qwen2.5:1.5b-instruct",
+    "timeoutSeconds": 3
+  }
+}
+```
 
 ## Current status / milestones
 
