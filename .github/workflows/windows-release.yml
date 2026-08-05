@@ -1,0 +1,113 @@
+name: windows-release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore FileLantern.sln
+
+      - name: Publish self-contained single-file win-x64 build
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.release.tag_name }}"
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = "${{ github.ref_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = "0.0.0-dev"
+          }
+          if ($version.StartsWith("v")) {
+            $version = $version.Substring(1)
+          }
+
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\publish\win-x64"
+          New-Item -Path $publishDir -ItemType Directory -Force | Out-Null
+
+          dotnet publish src/FileLantern.App/FileLantern.App.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            /p:PublishSingleFile=true `
+            /p:EnableCompressionInSingleFile=true `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            /p:DebugType=None `
+            /p:DebugSymbols=false `
+            /p:Version=$version `
+            -o $publishDir
+
+          $exePath = Join-Path $publishDir "FileLantern.App.exe"
+          if (!(Test-Path $exePath)) {
+            throw "Expected published executable not found at $exePath"
+          }
+
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\publish\win-x64"
+          $portableDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\portable"
+          New-Item -Path $portableDir -ItemType Directory -Force | Out-Null
+
+          $portableZip = Join-Path $portableDir ("file-lantern-win-x64-portable-{0}.zip" -f $env:APP_VERSION)
+          Compress-Archive -Path (Join-Path $publishDir "*") -DestinationPath $portableZip -Force
+
+          if (!(Test-Path $portableZip)) {
+            throw "Portable ZIP not generated"
+          }
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\publish\win-x64"
+          $installerDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\installer"
+          New-Item -Path $installerDir -ItemType Directory -Force | Out-Null
+
+          $issPath = Join-Path $env:GITHUB_WORKSPACE "packaging\windows\FileLantern.iss"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+
+          & $iscc $issPath "/DMyAppVersion=$env:APP_VERSION" "/DSourceDir=$publishDir" "/DOutputDir=$installerDir"
+
+          $installerExe = Join-Path $installerDir ("file-lantern-setup-{0}.exe" -f $env:APP_VERSION)
+          if (!(Test-Path $installerExe)) {
+            throw "Installer executable not generated"
+          }
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-artifacts
+          path: |
+            artifacts/portable/*.zip
+            artifacts/installer/*.exe
+          if-no-files-found: error
+
+      - name: Attach artifacts to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/portable/*.zip
+            artifacts/installer/*.exe
+          fail_on_unmatched_files: true

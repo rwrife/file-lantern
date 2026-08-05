@@ -30,7 +30,19 @@ Windows Search is slow, opaque, and cloud-tangled. Everything is fast but filena
 
 ## How to use (Windows-first quickstart)
 
-> Packaging is in progress; until the first release, run from source (see PLAN.md).
+### Install from GitHub Releases (Windows 10/11)
+
+1. Open the latest release: <https://github.com/rwrife/file-lantern/releases/latest>
+2. Download one of these artifacts:
+   - **Installer:** `file-lantern-setup-<version>.exe`
+   - **Portable:** `file-lantern-win-x64-portable-<version>.zip`
+3. Installer path:
+   - Run the setup EXE and follow the wizard.
+   - Launch **file-lantern** from Start Menu.
+   - Uninstall via **Settings → Apps → Installed apps**.
+4. Portable path:
+   - Extract the ZIP anywhere.
+   - Run `FileLantern.App.exe` directly.
 
 ### Run from source (Windows 10/11)
 
@@ -42,6 +54,20 @@ cd file-lantern
 dotnet build FileLantern.sln
 dotnet run --project src/FileLantern.App/FileLantern.App.csproj
 ```
+
+### Packaging command (self-contained single-file)
+
+```powershell
+dotnet publish src/FileLantern.App/FileLantern.App.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  /p:PublishSingleFile=true `
+  /p:EnableCompressionInSingleFile=true `
+  /p:IncludeNativeLibrariesForSelfExtract=true
+```
+
+GitHub Actions workflow: `.github/workflows/windows-release.yml` builds the installer + portable ZIP and attaches both artifacts to published releases.
 
 Current milestone status: filename indexing, instant search-as-you-type, full-text content search, and structured query filters are wired in for the desktop app.
 
